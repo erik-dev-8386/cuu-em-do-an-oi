@@ -27,4 +27,4 @@ flutter:
 
   # Khai báo file best.onnx tại đây:
   assets:
-    - assets/models/best.onnx
+    - assets/models/

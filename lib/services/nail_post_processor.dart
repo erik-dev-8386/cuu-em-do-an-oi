@@ -25,7 +25,7 @@ class Detection {
 class NailPostProcessor {
   static double _sigmoid(double x) => 1.0 / (1.0 + exp(-x));
 
-  /// Giải mã Output0 (Detections) và Output1 (Mask Prototypes) theo pipeline Ultralytics
+  /// Giải mã Output0 (Detections) và Output1 (Mask Prototypes) động theo kích thước model
   static List<List<Offset>> decodeOutputs({
     required List<OrtValue?>? outputs,
     required LetterboxResult letterbox,
@@ -64,7 +64,7 @@ class NailPostProcessor {
 
       if (nmsDetections.isEmpty) return [];
 
-      // 3. ĐỌC MA TRẬN MASK PROTOTYPE TỪ OUTPUT 1 ([1, 32, 160, 160])
+      // 3. ĐỌC MA TRẬN MASK PROTOTYPE TỪ OUTPUT 1
       dynamic rawOut1;
       if (outputs.length > 1) {
         rawOut1 = outputs[1]?.value;
@@ -72,23 +72,29 @@ class NailPostProcessor {
 
       final double imgW = letterbox.originalWidth.toDouble();
       final double imgH = letterbox.originalHeight.toDouble();
+      final int inputSize = letterbox.targetSize; // 416 hoặc 640...
 
-      // 4. TÁI TẠO MASK & RÚT BIÊN CONTOUR THEO QUY TRÌNH ULTRALYTICS
+      // 4. TÁI TẠO MASK & RÚT BIÊN CONTOUR THEO KÍCH THƯỚC MODEL ĐỘNG
       for (var det in nmsDetections) {
-        List<Offset> polygon640 = [];
+        List<Offset> polygonTarget = [];
 
         if (rawOut1 != null) {
-          polygon640 = _reconstructUltralyticsMaskContour(det, rawOut1, maskThreshold);
+          polygonTarget = _reconstructUltralyticsMaskContour(
+            det,
+            rawOut1,
+            maskThreshold,
+            inputSize,
+          );
         }
 
         // Ellipse fallback nếu mask proto rỗng
-        if (polygon640.isEmpty) {
-          polygon640 = _generateBoxEllipsePoints(det);
+        if (polygonTarget.isEmpty) {
+          polygonTarget = _generateBoxEllipsePoints(det);
         }
 
         // 5. UN-LETTERBOX VỀ TỌA ĐỘ ẢNH GỐC
         final List<Offset> origPolygon = [];
-        for (var pt in polygon640) {
+        for (var pt in polygonTarget) {
           double origX = (pt.dx - letterbox.padLeft) / letterbox.scale;
           double origY = (pt.dy - letterbox.padTop) / letterbox.scale;
 
@@ -109,7 +115,7 @@ class NailPostProcessor {
     return nailPolygons;
   }
 
-  /// Trích xuất danh sách Candidate từ Output0 (Tự động thích ứng [37][8400] hoặc [8400][37])
+  /// Trích xuất danh sách Candidate từ Output0 (Tự động thích ứng [37][anchors] hoặc [anchors][37])
   static List<Detection> _parseOutput0(dynamic rawOut0, double confThreshold) {
     final List<Detection> candidates = [];
 
@@ -125,7 +131,7 @@ class NailPostProcessor {
 
     print("📊 Output0 Tensor Structure: dimA=$dimA, dimB=$dimB");
 
-    // Case 1: [37][8400] - Channels First
+    // Case 1: [37][anchors] - Channels First
     if (dimA <= 40 && dimB > 100) {
       final int numChannels = dimA;
       final int numAnchors = dimB;
@@ -157,7 +163,7 @@ class NailPostProcessor {
         }
       }
     }
-    // Case 2: [8400][37] - Anchors First
+    // Case 2: [anchors][37] - Anchors First
     else if (dimA > 100 && dimB <= 40) {
       final int numAnchors = dimA;
       final int numChannels = dimB;
@@ -194,21 +200,27 @@ class NailPostProcessor {
     return candidates;
   }
 
-  /// Quy trình Reconstruct chuẩn Ultralytics:
-  /// 1. Nhân 32 Coeffs * 32 Prototype (160x160) -> 160x160 Float Mask
-  /// 2. Upsample Bilinear 160x160 lên 640x640 Float Mask
-  /// 3. Crop theo Bounding Box trong không gian 640x640 & Threshold >= 0.5
-  /// 4. Rút đường biên Boundary Tracing trên lưới 640x640
+  /// Reconstruct Mask với kích thước Prototype tự động (104x104 hoặc 160x160)
+  /// và Bilinear Upsample lên inputSize (416 hoặc 640)
   static List<Offset> _reconstructUltralyticsMaskContour(
     Detection det,
     dynamic rawProto,
     double maskThreshold,
+    int inputSize,
   ) {
-    const int protoH = 160;
-    const int protoW = 160;
+    int protoW = 160;
+    int protoH = 160;
 
-    // Bước 1: Nhân 32 coeffs * Prototype 160x160 toàn bộ vùng
-    final List<Float32List> mask160 = List.generate(
+    if (rawProto != null) {
+      final dims = _getProtoDimensions(rawProto);
+      protoW = dims.width;
+      protoH = dims.height;
+    }
+
+    print("🧩 Proto Mask Resolution: ${protoW}x$protoH | Input Target Size: ${inputSize}x$inputSize");
+
+    // Bước 1: Nhân 32 coeffs * Prototype (protoW x protoH)
+    final List<Float32List> maskProto = List.generate(
       protoH,
       (_) => Float32List(protoW),
     );
@@ -219,80 +231,127 @@ class NailPostProcessor {
         for (int c = 0; c < det.maskCoeffs.length && c < 32; c++) {
           val += det.maskCoeffs[c] * _getProtoVal(rawProto, c, y, x, protoH, protoW);
         }
-        mask160[y][x] = _sigmoid(val);
+        maskProto[y][x] = _sigmoid(val);
       }
     }
 
-    // Bước 2: Upsample Bilinear từ 160x160 lên 640x640
-    final List<Float32List> mask640 = _bilinearResize160To640(mask160);
+    // Bước 2: Upsample Bilinear từ (protoW x protoH) lên (inputSize x inputSize)
+    final List<Float32List> maskTarget = _bilinearResize(
+      maskProto,
+      srcW: protoW,
+      srcH: protoH,
+      dstW: inputSize,
+      dstH: inputSize,
+    );
 
-    // Bước 3: Crop Bounding Box trong không gian 640x640 & Threshold
-    int boxX1 = (det.cx - det.w / 2.0).floor().clamp(0, 639);
-    int boxY1 = (det.cy - det.h / 2.0).floor().clamp(0, 639);
-    int boxX2 = (det.cx + det.w / 2.0).ceil().clamp(0, 639);
-    int boxY2 = (det.cy + det.h / 2.0).ceil().clamp(0, 639);
+    // Bước 3: Crop Bounding Box trong không gian inputSize x inputSize & Threshold
+    int boxX1 = (det.cx - det.w / 2.0).floor().clamp(0, inputSize - 1);
+    int boxY1 = (det.cy - det.h / 2.0).floor().clamp(0, inputSize - 1);
+    int boxX2 = (det.cx + det.w / 2.0).ceil().clamp(0, inputSize - 1);
+    int boxY2 = (det.cy + det.h / 2.0).ceil().clamp(0, inputSize - 1);
 
     if (boxX2 <= boxX1 || boxY2 <= boxY1) return [];
 
-    final List<List<bool>> binaryGrid640 = List.generate(
-      640,
-      (_) => List.filled(640, false),
+    final List<List<bool>> binaryGrid = List.generate(
+      inputSize,
+      (_) => List.filled(inputSize, false),
     );
 
     for (int y = boxY1; y <= boxY2; y++) {
       for (int x = boxX1; x <= boxX2; x++) {
-        if (mask640[y][x] >= maskThreshold) {
-          binaryGrid640[y][x] = true;
+        if (maskTarget[y][x] >= maskThreshold) {
+          binaryGrid[y][x] = true;
         }
       }
     }
 
-    // Bước 4: Boundary Tracing trên ma trận nhị phân 640x640
-    final List<Point<int>> boundaryPoints = _traceBoundary(binaryGrid640, boxX1, boxY1, boxX2, boxY2);
+    // Bước 4: Boundary Tracing trên ma trận nhị phân inputSize x inputSize
+    final List<Point<int>> boundaryPoints = _traceBoundary(
+      binaryGrid,
+      boxX1, boxY1, boxX2, boxY2,
+      gridSize: inputSize,
+    );
     if (boundaryPoints.isEmpty) return [];
 
-    final List<Offset> points640 = [];
+    final List<Offset> pointsTarget = [];
     for (var pt in boundaryPoints) {
-      points640.add(Offset(pt.x.toDouble(), pt.y.toDouble()));
+      pointsTarget.add(Offset(pt.x.toDouble(), pt.y.toDouble()));
     }
 
-    return points640;
+    return pointsTarget;
   }
 
-  /// Upsample Bilinear từ 160x160 lên 640x640
-  static List<Float32List> _bilinearResize160To640(List<Float32List> mask160) {
-    final List<Float32List> mask640 = List.generate(640, (_) => Float32List(640));
-    const double scale = 160.0 / 640.0;
+  /// Tự động dò độ phân giải Prototype Mask (104x104, 160x160...)
+  static ({int width, int height}) _getProtoDimensions(dynamic rawProto) {
+    if (rawProto is Float32List || rawProto is List<double> || rawProto is List<num>) {
+      int totalLen = rawProto.length;
+      int spatialSize = sqrt(totalLen / 32.0).round();
+      if (spatialSize > 0) return (width: spatialSize, height: spatialSize);
+    }
 
-    for (int y = 0; y < 640; y++) {
-      double gy = (y + 0.5) * scale - 0.5;
-      int y1 = gy.floor().clamp(0, 158);
+    if (rawProto is List) {
+      dynamic level = rawProto;
+      if (level.length == 1 && level[0] is List) {
+        level = level[0];
+      }
+      if (level is List && level.isNotEmpty) {
+        dynamic channel0 = level[0];
+        if (channel0 is List) {
+          int h = channel0.length;
+          if (h > 0 && channel0[0] is List) {
+            int w = (channel0[0] as List).length;
+            return (width: w, height: h);
+          } else if (h > 0 && channel0[0] is num) {
+            int spatialSize = sqrt(h).round();
+            return (width: spatialSize, height: spatialSize);
+          }
+        }
+      }
+    }
+    return (width: 160, height: 160);
+  }
+
+  /// Bilinear Resize ma trận 2D Float từ (srcW x srcH) lên (dstW x dstH)
+  static List<Float32List> _bilinearResize(
+    List<Float32List> src, {
+    required int srcW,
+    required int srcH,
+    required int dstW,
+    required int dstH,
+  }) {
+    final List<Float32List> dst = List.generate(dstH, (_) => Float32List(dstW));
+    final double scaleX = srcW / dstW;
+    final double scaleY = srcH / dstH;
+
+    for (int y = 0; y < dstH; y++) {
+      double gy = (y + 0.5) * scaleY - 0.5;
+      int y1 = gy.floor().clamp(0, srcH - 2);
       int y2 = y1 + 1;
       double dy = gy - y1;
 
-      for (int x = 0; x < 640; x++) {
-        double gx = (x + 0.5) * scale - 0.5;
-        int x1 = gx.floor().clamp(0, 158);
+      for (int x = 0; x < dstW; x++) {
+        double gx = (x + 0.5) * scaleX - 0.5;
+        int x1 = gx.floor().clamp(0, srcW - 2);
         int x2 = x1 + 1;
         double dx = gx - x1;
 
-        double v11 = mask160[y1][x1];
-        double v21 = mask160[y1][x2];
-        double v12 = mask160[y2][x1];
-        double v22 = mask160[y2][x2];
+        double v11 = src[y1][x1];
+        double v21 = src[y1][x2];
+        double v12 = src[y2][x1];
+        double v22 = src[y2][x2];
 
         double val = (1.0 - dx) * (1.0 - dy) * v11 +
             dx * (1.0 - dy) * v21 +
             (1.0 - dx) * dy * v12 +
             dx * dy * v22;
 
-        mask640[y][x] = val;
+        dst[y][x] = val;
       }
     }
-    return mask640;
+    return dst;
   }
 
-  /// Trích xuất giá trị từ Tensor Proto Mask 160x160
+  /// Trích xuất giá trị từ Tensor Proto Mask
   static double _getProtoVal(
     dynamic rawProto,
     int c,
@@ -338,14 +397,15 @@ class NailPostProcessor {
     return 0.0;
   }
 
-  /// Moore-Neighbor Tracing Algorithm trên lưới 640x640
+  /// Moore-Neighbor Tracing Algorithm trên ma trận nhị phân gridSize x gridSize
   static List<Point<int>> _traceBoundary(
     List<List<bool>> grid,
     int minX,
     int minY,
     int maxX,
-    int maxY,
-  ) {
+    int maxY, {
+    required int gridSize,
+  }) {
     Point<int>? startPt;
 
     outerLoop:
@@ -379,7 +439,7 @@ class NailPostProcessor {
         int nx = currPt.x + dx[dir];
         int ny = currPt.y + dy[dir];
 
-        if (nx >= 0 && nx < 640 && ny >= 0 && ny < 640 && grid[ny][nx]) {
+        if (nx >= 0 && nx < gridSize && ny >= 0 && ny < gridSize && grid[ny][nx]) {
           currPt = Point(nx, ny);
           backtrackDir = (dir + 4) % 8;
           foundNext = true;

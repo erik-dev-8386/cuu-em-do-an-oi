@@ -24,11 +24,26 @@ class _NailSnapshotPageState extends State<NailSnapshotPage> {
   Color _selectedColor = const Color(0xFFFF4081);
   double _imgWidth = 0;
   double _imgHeight = 0;
+  String _selectedModel = 'assets/models/nail_seg.onnx';
 
   @override
   void initState() {
     super.initState();
-    _onnxService.initModel();
+    _onnxService.initModel(modelPath: _selectedModel);
+  }
+
+  Future<void> _changeModel(String newModel) async {
+    if (_selectedModel == newModel) return;
+    setState(() {
+      _selectedModel = newModel;
+      _isProcessing = true;
+    });
+    await _onnxService.initModel(modelPath: newModel);
+    if (_imageFile != null) {
+      await _processSelectedImage();
+    } else {
+      setState(() => _isProcessing = false);
+    }
   }
 
   Future<void> _pickImage(ImageSource source) async {
@@ -58,6 +73,7 @@ class _NailSnapshotPageState extends State<NailSnapshotPage> {
         _imgHeight = decodedImage.height.toDouble();
       });
 
+      await _onnxService.initModel(modelPath: _selectedModel);
       final result = await _onnxService.processImage(decodedImage);
 
       if (!mounted) return;
@@ -78,8 +94,31 @@ class _NailSnapshotPageState extends State<NailSnapshotPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Nailify - Virtual Try-On'),
+        title: const Text('Nailify - AR Try-On'),
         backgroundColor: const Color(0xFFFF4081),
+        actions: [
+          DropdownButton<String>(
+            value: _selectedModel,
+            dropdownColor: Colors.white,
+            icon: const Icon(Icons.arrow_drop_down, color: Colors.white),
+            underline: const SizedBox(),
+            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+            items: const [
+              DropdownMenuItem(
+                value: 'assets/models/nail_seg.onnx',
+                child: Text('nail_seg.onnx', style: TextStyle(color: Colors.black)),
+              ),
+              DropdownMenuItem(
+                value: 'assets/models/best.onnx',
+                child: Text('best.onnx', style: TextStyle(color: Colors.black)),
+              ),
+            ],
+            onChanged: (val) {
+              if (val != null) _changeModel(val);
+            },
+          ),
+          const SizedBox(width: 8),
+        ],
       ),
       body: Column(
         children: [

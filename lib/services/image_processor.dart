@@ -9,6 +9,7 @@ class LetterboxResult {
   final double padTop;
   final int originalWidth;
   final int originalHeight;
+  final int targetSize;
 
   LetterboxResult({
     required this.tensor,
@@ -17,19 +18,32 @@ class LetterboxResult {
     required this.padTop,
     required this.originalWidth,
     required this.originalHeight,
+    required this.targetSize,
   });
 }
 
+class _LetterboxParams {
+  final img.Image image;
+  final int targetSize;
+
+  _LetterboxParams(this.image, this.targetSize);
+}
+
 class ImageProcessor {
-  /// Chạy xử lý ảnh LetterBox trên luồng ngầm (Isolate)
-  static Future<LetterboxResult> imageToTensorAsync(img.Image inputImage) async {
-    return await compute(_processLetterboxTensor, inputImage);
+  /// Chạy xử lý ảnh LetterBox trên luồng ngầm (Isolate) với targetSize động
+  static Future<LetterboxResult> imageToTensorAsync(
+    img.Image inputImage, {
+    int targetSize = 640,
+  }) async {
+    return await compute(_processLetterboxTensor, _LetterboxParams(inputImage, targetSize));
   }
 
-  static LetterboxResult _processLetterboxTensor(img.Image inputImage) {
+  static LetterboxResult _processLetterboxTensor(_LetterboxParams params) {
+    final img.Image inputImage = params.image;
+    final int targetSize = params.targetSize;
+
     final int imgW = inputImage.width;
     final int imgH = inputImage.height;
-    const int targetSize = 640;
 
     final double scale = min(targetSize / imgW, targetSize / imgH);
     final int newW = (imgW * scale).round();
@@ -45,7 +59,7 @@ class ImageProcessor {
     final double fillValue = 114.0 / 255.0;
     float32List.fillRange(0, float32List.length, fillValue);
 
-    const int channelStride = targetSize * targetSize;
+    final int channelStride = targetSize * targetSize;
 
     for (int y = 0; y < newH; y++) {
       final int tensorY = (padTop + y).toInt();
@@ -71,6 +85,7 @@ class ImageProcessor {
       padTop: padTop,
       originalWidth: imgW,
       originalHeight: imgH,
+      targetSize: targetSize,
     );
   }
 }

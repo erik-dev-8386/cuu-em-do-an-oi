@@ -15,27 +15,41 @@ class NailOnnxInferenceResult {
 
 class NailOnnxService {
   OrtSession? _session;
+  String _currentModelPath = '';
 
-  Future<void> initModel() async {
-    if (_session != null) return;
+  Future<void> initModel({String modelPath = 'assets/models/nail_seg.onnx'}) async {
+    if (_session != null && _currentModelPath == modelPath) return;
+
+    _session?.release();
+    _session = null;
+    _currentModelPath = modelPath;
 
     OrtEnv.instance.init();
     final sessionOptions = OrtSessionOptions();
 
-    final rawBytes = await rootBundle.load('assets/models/best.onnx');
+    final rawBytes = await rootBundle.load(modelPath);
     final bytes = rawBytes.buffer.asUint8List();
 
     _session = OrtSession.fromBuffer(bytes, sessionOptions);
+    print("🎉 NẠP MODEL ONNX ($modelPath) THÀNH CÔNG!");
   }
 
   Future<NailOnnxInferenceResult> processImage(img.Image rawImage) async {
     await initModel();
 
-    final letterboxResult = await ImageProcessor.imageToTensorAsync(rawImage);
+    int targetSize = 640;
+    if (_currentModelPath.contains('nail_seg.onnx')) {
+      targetSize = 416;
+    }
+
+    final letterboxResult = await ImageProcessor.imageToTensorAsync(
+      rawImage,
+      targetSize: targetSize,
+    );
 
     final inputOrt = OrtValueTensor.createTensorWithDataList(
       letterboxResult.tensor,
-      [1, 3, 640, 640],
+      [1, 3, targetSize, targetSize],
     );
 
     String inputName = 'images';
