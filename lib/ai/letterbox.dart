@@ -20,16 +20,10 @@ class LetterboxResult {
   });
 }
 
-class ImageProcessor {
-  /// Chạy xử lý ảnh LetterBox trên luồng ngầm (Isolate)
-  static Future<LetterboxResult> imageToTensorAsync(img.Image inputImage) async {
-    return await compute(_processLetterboxTensor, inputImage);
-  }
-
-  static LetterboxResult _processLetterboxTensor(img.Image inputImage) {
+class LetterboxProcessor {
+  static LetterboxResult process(img.Image inputImage, {int targetSize = 640}) {
     final int imgW = inputImage.width;
     final int imgH = inputImage.height;
-    const int targetSize = 640;
 
     final double scale = min(targetSize / imgW, targetSize / imgH);
     final int newW = (imgW * scale).round();
@@ -41,11 +35,10 @@ class ImageProcessor {
     final resizedImage = img.copyResize(inputImage, width: newW, height: newH);
 
     final Float32List float32List = Float32List(1 * 3 * targetSize * targetSize);
-    // Điền màu xám 114 chuẩn Ultralytics LetterBox
     final double fillValue = 114.0 / 255.0;
     float32List.fillRange(0, float32List.length, fillValue);
 
-    const int channelStride = targetSize * targetSize;
+    final int channelStride = targetSize * targetSize;
 
     for (int y = 0; y < newH; y++) {
       final int tensorY = (padTop + y).toInt();

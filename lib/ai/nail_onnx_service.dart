@@ -1,7 +1,8 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:onnxruntime/onnxruntime.dart';
-import 'image_processor.dart';
 import 'package:image/image.dart' as img;
+import 'image_processor.dart';
 
 class NailOnnxInferenceResult {
   final List<OrtValue?>? outputs;
@@ -28,10 +29,12 @@ class NailOnnxService {
     _session = OrtSession.fromBuffer(bytes, sessionOptions);
   }
 
-  Future<NailOnnxInferenceResult> processImage(img.Image rawImage) async {
+  Future<NailOnnxInferenceResult> processImage(img.Image rawImage, {bool isSync = false}) async {
     await initModel();
 
-    final letterboxResult = await ImageProcessor.imageToTensorAsync(rawImage);
+    final letterboxResult = isSync
+        ? ImageProcessor.imageToTensorSync(rawImage)
+        : await ImageProcessor.imageToTensorAsync(rawImage);
 
     final inputOrt = OrtValueTensor.createTensorWithDataList(
       letterboxResult.tensor,
@@ -49,14 +52,10 @@ class NailOnnxService {
     final outputs = await _session!.runAsync(runOptions, {inputName: inputOrt});
     inputOrt.release();
 
-    if (outputs != null) {
-      print("🔍 ONNX Input Names: ${_session?.inputNames}");
-      print("🔍 ONNX Output Names: ${_session?.outputNames}");
-      print("🔍 ONNX Output Count: ${outputs.length}");
-      for (int i = 0; i < outputs.length; i++) {
-        final val = outputs[i]?.value;
-        print("  🔹 Output $i runtimeType: ${val.runtimeType}");
-      }
+    if (outputs != null && kDebugMode) {
+      debugPrint("🔍 ONNX Input Names: ${_session?.inputNames}");
+      debugPrint("🔍 ONNX Output Names: ${_session?.outputNames}");
+      debugPrint("🔍 ONNX Output Count: ${outputs.length}");
     }
 
     return NailOnnxInferenceResult(

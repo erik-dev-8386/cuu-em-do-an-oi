@@ -3,14 +3,11 @@ import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:image/image.dart' as img;
 
-import '../widgets/nail_painter.dart';
-import 'nail_onnx_service.dart';
-import 'nail_post_processor.dart';
-
-
+import '../isolate/inference_worker.dart';
+import '../painter/nail_painter.dart';
 
 class NailSnapshotPage extends StatefulWidget {
-  const NailSnapshotPage({Key? key}) : super(key: key);
+  const NailSnapshotPage({super.key});
 
   @override
   State<NailSnapshotPage> createState() => _NailSnapshotPageState();
@@ -19,16 +16,23 @@ class NailSnapshotPage extends StatefulWidget {
 class _NailSnapshotPageState extends State<NailSnapshotPage> {
   File? _imageFile;
   bool _isProcessing = false;
-  final NailOnnxService _onnxService = NailOnnxService();
+  final InferenceWorker _worker = InferenceWorker();
   List<List<Offset>> _nailPolygons = [];
   Color _selectedColor = const Color(0xFFFF4081);
   double _imgWidth = 0;
   double _imgHeight = 0;
+  Duration? _lastInferenceDuration;
 
   @override
   void initState() {
     super.initState();
-    _onnxService.initModel();
+    _worker.init();
+  }
+
+  @override
+  void dispose() {
+    _worker.dispose();
+    super.dispose();
   }
 
   Future<void> _pickImage(ImageSource source) async {
@@ -58,17 +62,13 @@ class _NailSnapshotPageState extends State<NailSnapshotPage> {
         _imgHeight = decodedImage.height.toDouble();
       });
 
-      final result = await _onnxService.processImage(decodedImage);
+      final result = await _worker.processFrame(decodedImage);
 
       if (!mounted) return;
 
-      final polygons = NailPostProcessor.decodeOutputs(
-        outputs: result.outputs,
-        letterbox: result.letterbox,
-      );
-
       setState(() {
-        _nailPolygons = polygons;
+        _nailPolygons = result.polygons;
+        _lastInferenceDuration = result.inferenceTime;
         _isProcessing = false;
       });
     }
@@ -78,8 +78,20 @@ class _NailSnapshotPageState extends State<NailSnapshotPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Nailify - Virtual Try-On'),
+        title: const Text('Snapshot Try-On (Ảnh Tĩnh)'),
         backgroundColor: const Color(0xFFFF4081),
+        actions: [
+          if (_lastInferenceDuration != null)
+            Center(
+              child: Padding(
+                padding: const EdgeInsets.only(right: 16.0),
+                child: Text(
+                  '${_lastInferenceDuration!.inMilliseconds}ms',
+                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+                ),
+              ),
+            ),
+        ],
       ),
       body: Column(
         children: [
@@ -164,7 +176,7 @@ class _NailSnapshotPageState extends State<NailSnapshotPage> {
           border: isSelected ? Border.all(color: Colors.black, width: 3) : null,
           boxShadow: [
             BoxShadow(
-              color: color.withOpacity(0.4),
+              color: color.withValues(alpha: 0.4),
               blurRadius: 6,
               offset: const Offset(0, 3),
             )

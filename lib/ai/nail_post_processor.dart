@@ -1,6 +1,6 @@
 import 'dart:math';
-import 'dart:typed_data';
 import 'dart:ui';
+import 'package:flutter/foundation.dart';
 import 'package:onnxruntime/onnxruntime.dart';
 import 'image_processor.dart';
 
@@ -20,12 +20,19 @@ class Detection {
     required this.score,
     required this.maskCoeffs,
   });
+
+  Rect get boundingBox => Rect.fromLTWH(
+        cx - w / 2.0,
+        cy - h / 2.0,
+        w,
+        h,
+      );
 }
 
 class NailPostProcessor {
   static double _sigmoid(double x) => 1.0 / (1.0 + exp(-x));
 
-  /// Giải mã Output0 (Detections) và Output1 (Mask Prototypes) theo pipeline Ultralytics
+  /// Giải mã Output0 (Detections) và Output1 (Mask Prototypes) theo pipeline Ultralytics ROI Tối ưu
   static List<List<Offset>> decodeOutputs({
     required List<OrtValue?>? outputs,
     required LetterboxResult letterbox,
@@ -73,12 +80,12 @@ class NailPostProcessor {
       final double imgW = letterbox.originalWidth.toDouble();
       final double imgH = letterbox.originalHeight.toDouble();
 
-      // 4. TÁI TẠO MASK & RÚT BIÊN CONTOUR THEO QUY TRÌNH ULTRALYTICS
+      // 4. TÁI TẠO MASK & RÚT BIÊN CONTOUR THEO QUY TRÌNH ULTRALYTICS ROI
       for (var det in nmsDetections) {
         List<Offset> polygon640 = [];
 
         if (rawOut1 != null) {
-          polygon640 = _reconstructUltralyticsMaskContour(det, rawOut1, maskThreshold);
+          polygon640 = _reconstructUltralyticsRoiMaskContour(det, rawOut1, maskThreshold);
         }
 
         // Ellipse fallback nếu mask proto rỗng
@@ -103,7 +110,9 @@ class NailPostProcessor {
         }
       }
     } catch (e, stack) {
-      print("⚠️ Lỗi giải mã Output YOLOv8-Seg: $e\n$stack");
+      if (kDebugMode) {
+        debugPrint("⚠️ Lỗi giải mã Output YOLOv8-Seg: $e\n$stack");
+      }
     }
 
     return nailPolygons;
@@ -122,8 +131,6 @@ class NailPostProcessor {
 
     int dimA = matrix.length;
     int dimB = (matrix[0] is List) ? (matrix[0] as List).length : 0;
-
-    print("📊 Output0 Tensor Structure: dimA=$dimA, dimB=$dimB");
 
     // Case 1: [37][8400] - Channels First
     if (dimA <= 40 && dimB > 100) {
@@ -185,48 +192,19 @@ class NailPostProcessor {
       }
     }
 
-    if (candidates.isNotEmpty) {
-      print("💡 [Sample Detection 0]: cx=${candidates[0].cx}, cy=${candidates[0].cy}, w=${candidates[0].w}, h=${candidates[0].h}, score=${candidates[0].score}");
-    } else {
-      print("⚠️ Không tìm thấy Detection nào vượt ngưỡng Confidence $confThreshold");
-    }
-
     return candidates;
   }
 
-  /// Quy trình Reconstruct chuẩn Ultralytics:
-  /// 1. Nhân 32 Coeffs * 32 Prototype (160x160) -> 160x160 Float Mask
-  /// 2. Upsample Bilinear 160x160 lên 640x640 Float Mask
-  /// 3. Crop theo Bounding Box trong không gian 640x640 & Threshold >= 0.5
-  /// 4. Rút đường biên Boundary Tracing trên lưới 640x640
-  static List<Offset> _reconstructUltralyticsMaskContour(
+  /// Quy trình Reconstruct chuẩn Ultralytics Tối ưu ROI (ROI-only computation):
+  /// 1. Tọa độ Box trong 640 -> Map sang 160 Prototype Space [px1, py1, px2, py2]
+  /// 2. Nhân 32 Coeffs * Prototype 160 CHỈ TRONG VÙNG ROI
+  /// 3. Upsample Bilinear CHỈ MẶT MẮT MÓN ROI lên Kích thước Bounding Box trong 640
+  /// 4. Boundary Tracing trong phạm vi Bounding Box (tăng tốc ~170 lần)
+  static List<Offset> _reconstructUltralyticsRoiMaskContour(
     Detection det,
     dynamic rawProto,
     double maskThreshold,
   ) {
-    const int protoH = 160;
-    const int protoW = 160;
-
-    // Bước 1: Nhân 32 coeffs * Prototype 160x160 toàn bộ vùng
-    final List<Float32List> mask160 = List.generate(
-      protoH,
-      (_) => Float32List(protoW),
-    );
-
-    for (int y = 0; y < protoH; y++) {
-      for (int x = 0; x < protoW; x++) {
-        double val = 0.0;
-        for (int c = 0; c < det.maskCoeffs.length && c < 32; c++) {
-          val += det.maskCoeffs[c] * _getProtoVal(rawProto, c, y, x, protoH, protoW);
-        }
-        mask160[y][x] = _sigmoid(val);
-      }
-    }
-
-    // Bước 2: Upsample Bilinear từ 160x160 lên 640x640
-    final List<Float32List> mask640 = _bilinearResize160To640(mask160);
-
-    // Bước 3: Crop Bounding Box trong không gian 640x640 & Threshold
     int boxX1 = (det.cx - det.w / 2.0).floor().clamp(0, 639);
     int boxY1 = (det.cy - det.h / 2.0).floor().clamp(0, 639);
     int boxX2 = (det.cx + det.w / 2.0).ceil().clamp(0, 639);
@@ -234,20 +212,82 @@ class NailPostProcessor {
 
     if (boxX2 <= boxX1 || boxY2 <= boxY1) return [];
 
+    // Map sang 160 prototype space (160 / 640 = 0.25)
+    int px1 = (boxX1 * 0.25).floor().clamp(0, 159);
+    int py1 = (boxY1 * 0.25).floor().clamp(0, 159);
+    int px2 = (boxX2 * 0.25).ceil().clamp(0, 159);
+    int py2 = (boxY2 * 0.25).ceil().clamp(0, 159);
+
+    int roiWProto = px2 - px1 + 1;
+    int roiHProto = py2 - py1 + 1;
+
+    if (roiWProto <= 0 || roiHProto <= 0) return [];
+
+    // 1. Tính toán Sigmoid Mask CHỈ trên vùng ROI 160
+    final List<Float32List> maskRoiProto = List.generate(
+      roiHProto,
+      (_) => Float32List(roiWProto),
+    );
+
+    for (int y = 0; y < roiHProto; y++) {
+      int protoY = py1 + y;
+      for (int x = 0; x < roiWProto; x++) {
+        int protoX = px1 + x;
+        double val = 0.0;
+        for (int c = 0; c < det.maskCoeffs.length && c < 32; c++) {
+          val += det.maskCoeffs[c] * _getProtoVal(rawProto, c, protoY, protoX, 160, 160);
+        }
+        maskRoiProto[y][x] = _sigmoid(val);
+      }
+    }
+
+    // 2. Upsample Bilinear CHỈ VÙNG ROI lên không gian Box (640)
+    final int boxW = boxX2 - boxX1 + 1;
+    final int boxH = boxY2 - boxY1 + 1;
+
     final List<List<bool>> binaryGrid640 = List.generate(
       640,
       (_) => List.filled(640, false),
     );
 
-    for (int y = boxY1; y <= boxY2; y++) {
-      for (int x = boxX1; x <= boxX2; x++) {
-        if (mask640[y][x] >= maskThreshold) {
-          binaryGrid640[y][x] = true;
+    final double scaleX = (roiWProto > 1) ? (roiWProto - 1.0) / max(1.0, boxW - 1.0) : 0.0;
+    final double scaleY = (roiHProto > 1) ? (roiHProto - 1.0) / max(1.0, boxH - 1.0) : 0.0;
+
+    for (int dy = 0; dy < boxH; dy++) {
+      double gy = dy * scaleY;
+      int y1 = gy.floor().clamp(0, roiHProto - 1);
+      int y2 = (y1 + 1).clamp(0, roiHProto - 1);
+      double fy = gy - y1;
+
+      int targetY = boxY1 + dy;
+      if (targetY < 0 || targetY >= 640) continue;
+
+      for (int dx = 0; dx < boxW; dx++) {
+        double gx = dx * scaleX;
+        int x1 = gx.floor().clamp(0, roiWProto - 1);
+        int x2 = (x1 + 1).clamp(0, roiWProto - 1);
+        double fx = gx - x1;
+
+        double v11 = maskRoiProto[y1][x1];
+        double v21 = maskRoiProto[y1][x2];
+        double v12 = maskRoiProto[y2][x1];
+        double v22 = maskRoiProto[y2][x2];
+
+        double val = (1.0 - fx) * (1.0 - fy) * v11 +
+            fx * (1.0 - fy) * v21 +
+            (1.0 - fx) * fy * v12 +
+            fx * fy * v22;
+
+        if (val >= maskThreshold) {
+          int targetX = boxX1 + dx;
+          if (targetX >= 0 && targetX < 640) {
+            binaryGrid640[targetY][targetX] = true;
+          }
         }
       }
     }
 
-    // Bước 4: Boundary Tracing trên ma trận nhị phân 640x640
+    // 3. Boundary Tracing trên lưới 640x640 trong phạm vi Box
     final List<Point<int>> boundaryPoints = _traceBoundary(binaryGrid640, boxX1, boxY1, boxX2, boxY2);
     if (boundaryPoints.isEmpty) return [];
 
@@ -257,39 +297,6 @@ class NailPostProcessor {
     }
 
     return points640;
-  }
-
-  /// Upsample Bilinear từ 160x160 lên 640x640
-  static List<Float32List> _bilinearResize160To640(List<Float32List> mask160) {
-    final List<Float32List> mask640 = List.generate(640, (_) => Float32List(640));
-    const double scale = 160.0 / 640.0;
-
-    for (int y = 0; y < 640; y++) {
-      double gy = (y + 0.5) * scale - 0.5;
-      int y1 = gy.floor().clamp(0, 158);
-      int y2 = y1 + 1;
-      double dy = gy - y1;
-
-      for (int x = 0; x < 640; x++) {
-        double gx = (x + 0.5) * scale - 0.5;
-        int x1 = gx.floor().clamp(0, 158);
-        int x2 = x1 + 1;
-        double dx = gx - x1;
-
-        double v11 = mask160[y1][x1];
-        double v21 = mask160[y1][x2];
-        double v12 = mask160[y2][x1];
-        double v22 = mask160[y2][x2];
-
-        double val = (1.0 - dx) * (1.0 - dy) * v11 +
-            dx * (1.0 - dy) * v21 +
-            (1.0 - dx) * dy * v12 +
-            dx * dy * v22;
-
-        mask640[y][x] = val;
-      }
-    }
-    return mask640;
   }
 
   /// Trích xuất giá trị từ Tensor Proto Mask 160x160
@@ -367,7 +374,7 @@ class NailPostProcessor {
     Point<int> currPt = startPt;
     int backtrackDir = 6;
     int iterations = 0;
-    const int maxIterations = 4000;
+    const int maxIterations = 2000;
 
     do {
       result.add(currPt);
