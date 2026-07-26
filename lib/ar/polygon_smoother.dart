@@ -1,65 +1,104 @@
 import 'dart:ui';
 
-/// Smooths nail polygons across consecutive video stream frames using IoU (Intersection over Union)
-/// matching and Exponential Moving Average (EMA) filtering to eliminate jitter.
+/// Tracks nail polygons across consecutive video frames.
+///
+/// Combines three things that used to live separately (and one that didn't
+/// work at all):
+/// - IoU-based matching of new detections against tracks from the previous
+///   frame (greedy, highest-IoU-first).
+/// - Exponential Moving Average blending of matched polygons to remove jitter.
+///   This only works because [YoloSegDecoder] now emits fixed-length,
+///   angle-canonical polygons (see `polygon_resampler.dart`) — before that,
+///   the length check below was almost never true and no smoothing happened.
+/// - A confirm/grace-period state machine per tracked nail: a brand-new
+///   detection must be seen for [confirmFrames] consecutive frames before it
+///   is shown (suppresses one-frame false-positive blips), and a previously
+///   confirmed nail keeps displaying its last known polygon for up to
+///   [graceFrames] frames after it stops matching (suppresses flicker from a
+///   single dropped/missed frame).
 class PolygonSmoother {
   final double alpha; // Smoothing factor (0.0 < alpha <= 1.0)
   final double minIouThreshold; // Minimum IoU threshold to consider a match
-  List<List<Offset>> _history = [];
+  final int confirmFrames; // Consecutive hits required before a nail is shown
+  final int graceFrames; // Consecutive misses tolerated before a shown nail is dropped
+
+  List<_TrackedNail> _tracks = [];
 
   PolygonSmoother({
     this.alpha = 0.4,
     this.minIouThreshold = 0.25,
+    this.confirmFrames = 2,
+    this.graceFrames = 2,
   });
 
   List<List<Offset>> smooth(List<List<Offset>> newPolygons) {
-    if (_history.isEmpty || newPolygons.isEmpty) {
-      _history = newPolygons;
-      return newPolygons;
-    }
+    final matchedTrackIdx = <int>{};
+    final matchedDetIdx = <int>{};
 
-    final List<List<Offset>> smoothedResult = [];
-
-    for (var newPoly in newPolygons) {
-      if (newPoly.isEmpty) continue;
-
-      final Rect newBox = _getBoundingBox(newPoly);
-      List<Offset>? bestMatchedPoly;
-      double maxIou = 0.0;
-
-      for (var histPoly in _history) {
-        final Rect histBox = _getBoundingBox(histPoly);
-        final double iou = _calculateRectIoU(newBox, histBox);
-        if (iou > maxIou) {
-          maxIou = iou;
-          bestMatchedPoly = histPoly;
+    final candidates = <_MatchCandidate>[];
+    for (int ti = 0; ti < _tracks.length; ti++) {
+      final trackBox = _getBoundingBox(_tracks[ti].polygon);
+      for (int di = 0; di < newPolygons.length; di++) {
+        final iou = _calculateRectIoU(trackBox, _getBoundingBox(newPolygons[di]));
+        if (iou >= minIouThreshold) {
+          candidates.add(_MatchCandidate(ti, di, iou));
         }
       }
+    }
+    candidates.sort((a, b) => b.iou.compareTo(a.iou));
 
-      // Match found based on IoU threshold
-      if (bestMatchedPoly != null &&
-          maxIou >= minIouThreshold &&
-          bestMatchedPoly.length == newPoly.length) {
-        final List<Offset> smoothedPoly = [];
-        for (int i = 0; i < newPoly.length; i++) {
-          final double smoothedX =
-              alpha * newPoly[i].dx + (1.0 - alpha) * bestMatchedPoly[i].dx;
-          final double smoothedY =
-              alpha * newPoly[i].dy + (1.0 - alpha) * bestMatchedPoly[i].dy;
-          smoothedPoly.add(Offset(smoothedX, smoothedY));
-        }
-        smoothedResult.add(smoothedPoly);
-      } else {
-        smoothedResult.add(newPoly);
+    for (final c in candidates) {
+      if (matchedTrackIdx.contains(c.trackIdx) || matchedDetIdx.contains(c.detIdx)) continue;
+      matchedTrackIdx.add(c.trackIdx);
+      matchedDetIdx.add(c.detIdx);
+
+      final track = _tracks[c.trackIdx];
+      final det = newPolygons[c.detIdx];
+      track.polygon = (track.polygon.length == det.length) ? _blend(track.polygon, det) : det;
+      track.hitStreak++;
+      track.missStreak = 0;
+      if (track.hitStreak >= confirmFrames) track.confirmed = true;
+    }
+
+    final survivors = <_TrackedNail>[];
+    for (int ti = 0; ti < _tracks.length; ti++) {
+      final track = _tracks[ti];
+      if (matchedTrackIdx.contains(ti)) {
+        survivors.add(track);
+        continue;
+      }
+      track.missStreak++;
+      track.hitStreak = 0;
+      if (track.confirmed && track.missStreak <= graceFrames) {
+        survivors.add(track);
+      }
+      // Unconfirmed tracks that miss a frame are dropped outright.
+    }
+
+    for (int di = 0; di < newPolygons.length; di++) {
+      if (!matchedDetIdx.contains(di)) {
+        survivors.add(_TrackedNail(polygon: newPolygons[di]));
       }
     }
 
-    _history = smoothedResult;
-    return smoothedResult;
+    _tracks = survivors;
+
+    return _tracks.where((t) => t.confirmed).map((t) => t.polygon).toList();
   }
 
   void reset() {
-    _history.clear();
+    _tracks = [];
+  }
+
+  List<Offset> _blend(List<Offset> prev, List<Offset> curr) {
+    final result = <Offset>[];
+    for (int i = 0; i < curr.length; i++) {
+      result.add(Offset(
+        alpha * curr[i].dx + (1.0 - alpha) * prev[i].dx,
+        alpha * curr[i].dy + (1.0 - alpha) * prev[i].dy,
+      ));
+    }
+    return result;
   }
 
   Rect _getBoundingBox(List<Offset> points) {
@@ -89,4 +128,24 @@ class PolygonSmoother {
 
     return unionArea <= 0 ? 0.0 : interArea / unionArea;
   }
+}
+
+class _TrackedNail {
+  List<Offset> polygon;
+  int hitStreak;
+  int missStreak;
+  bool confirmed;
+
+  _TrackedNail({
+    required this.polygon,
+  })  : hitStreak = 1,
+        missStreak = 0,
+        confirmed = false;
+}
+
+class _MatchCandidate {
+  final int trackIdx;
+  final int detIdx;
+  final double iou;
+  _MatchCandidate(this.trackIdx, this.detIdx, this.iou);
 }

@@ -45,7 +45,13 @@ android {
 }
 
 dependencies {
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.18.0")
+    // No explicit onnxruntime-android Maven dependency: the `onnxruntime` Dart
+    // plugin bundles its own (older) libonnxruntime.so via jniLibs, which only
+    // supports ONNX opset <= 19 and fails to load best.onnx (opset 20). Adding
+    // a newer Maven dependency here didn't help — pickFirsts kept resolving to
+    // the plugin's bundled copy regardless. Fix: a newer libonnxruntime.so
+    // (extracted from onnxruntime-android:1.22.0) is committed directly under
+    // app/src/main/jniLibs/<abi>/, which takes priority over the plugin's copy.
 }
 
 flutter {

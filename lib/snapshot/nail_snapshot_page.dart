@@ -53,10 +53,12 @@ class _NailSnapshotPageState extends State<NailSnapshotPage> {
   Future<void> _processSelectedImage() async {
     if (_imageFile == null) return;
 
-    final imageBytes = await _imageFile!.readAsBytes();
-    final decodedImage = img.decodeImage(imageBytes);
+    try {
+      final imageBytes = await _imageFile!.readAsBytes();
+      final decodedImage = img.decodeImage(imageBytes);
 
-    if (decodedImage != null) {
+      if (decodedImage == null) return;
+
       setState(() {
         _imgWidth = decodedImage.width.toDouble();
         _imgHeight = decodedImage.height.toDouble();
@@ -69,8 +71,26 @@ class _NailSnapshotPageState extends State<NailSnapshotPage> {
       setState(() {
         _nailPolygons = result.polygons;
         _lastInferenceDuration = result.inferenceTime;
-        _isProcessing = false;
       });
+
+      if (result.polygons.isEmpty && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Không nhận diện được móng nào trong ảnh này.')),
+        );
+      }
+    } catch (e) {
+      debugPrint("⚠️ Lỗi xử lý ảnh Snapshot: $e");
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Lỗi khi nhận diện móng: $e')),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isProcessing = false;
+        });
+      }
     }
   }
 

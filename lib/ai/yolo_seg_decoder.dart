@@ -4,6 +4,7 @@ import 'mask_reconstruct.dart';
 import 'marching_squares.dart';
 import 'nms.dart';
 import 'onnx_service.dart';
+import 'polygon_resampler.dart';
 
 class YoloSegDecoder {
   static double _sigmoid(double x) => 1.0 / (1.0 + exp(-x));
@@ -55,6 +56,11 @@ class YoloSegDecoder {
       if (polygon640.isEmpty) {
         polygon640 = _generateBoxEllipsePoints(det);
       }
+
+      // Step 4b: Resample to a fixed-length, angle-canonical polygon. This
+      // smooths the pixel-stairstepped raw contour and gives every polygon
+      // the same point count/order so PolygonSmoother can blend across frames.
+      polygon640 = PolygonResampler.resample(polygon640);
 
       // Step 5: Undo Letterbox to Original Image Coordinates
       final List<Offset> origPolygon = [];

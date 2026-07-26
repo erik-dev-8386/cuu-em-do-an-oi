@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:onnxruntime/onnxruntime.dart';
 import 'package:image/image.dart' as img;
@@ -23,6 +24,13 @@ class OnnxService {
 
     OrtEnv.instance.init();
     final sessionOptions = OrtSessionOptions();
+    // Measured on-device: neither multi-threading nor XNNPACK moved the needle
+    // on this model/CPU (inference itself dominates at ~2.6-3.4s regardless).
+    // Keeping graph optimization (always safe) and multi-threading (harmless
+    // default) but dropped the XNNPACK attempt since it added complexity with
+    // no measured benefit here.
+    sessionOptions.setSessionGraphOptimizationLevel(GraphOptimizationLevel.ortEnableAll);
+    sessionOptions.setIntraOpNumThreads(Platform.numberOfProcessors);
 
     final rawBytes = await rootBundle.load('assets/models/best.onnx');
     final bytes = rawBytes.buffer.asUint8List();
@@ -31,9 +39,14 @@ class OnnxService {
   }
 
   Future<YoloSegOutputs> runInference(img.Image rawImage) async {
-    await initModel();
-
     final letterboxResult = LetterboxProcessor.process(rawImage);
+    return runInferenceOnTensor(letterboxResult);
+  }
+
+  /// Same as [runInference] but skips the letterbox step, for callers (the AR
+  /// pipeline) that already prepared the tensor on a background isolate.
+  Future<YoloSegOutputs> runInferenceOnTensor(LetterboxResult letterboxResult) async {
+    await initModel();
 
     final inputOrt = OrtValueTensor.createTensorWithDataList(
       letterboxResult.tensor,

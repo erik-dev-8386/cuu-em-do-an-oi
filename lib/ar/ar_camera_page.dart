@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
-import 'package:image/image.dart' as img;
 
 import '../camera/frame_converter.dart';
 import '../camera/frame_scheduler.dart';
@@ -23,10 +22,13 @@ class _ArCameraPageState extends State<ArCameraPage> {
   int _selectedCameraIdx = 0;
 
   final InferenceWorker _worker = InferenceWorker();
-  final FrameScheduler _scheduler = FrameScheduler(minFrameInterval: const Duration(milliseconds: 90));
+  // The heavy per-frame work now runs off the UI isolate (see InferenceWorker.processCameraFrame),
+  // so this only needs to bound worst-case throughput/battery use, not protect UI smoothness.
+  final FrameScheduler _scheduler = FrameScheduler(minFrameInterval: const Duration(milliseconds: 50));
   final PolygonSmoother _polygonSmoother = PolygonSmoother(alpha: 0.4, minIouThreshold: 0.25);
 
   bool _isCameraReady = false;
+  String? _initError;
   List<List<Offset>> _nailPolygons = [];
   Color _selectedColor = const Color(0xFFFF4081);
 
@@ -55,6 +57,9 @@ class _ArCameraPageState extends State<ArCameraPage> {
   }
 
   Future<void> _startARPipeline() async {
+    setState(() {
+      _initError = null;
+    });
     try {
       // 1. Await Worker & ONNX Initialization
       await _worker.init();
@@ -84,20 +89,16 @@ class _ArCameraPageState extends State<ArCameraPage> {
         _scheduler.markBusy();
 
         try {
-          // Fast YUV/BGRA -> RGB conversion
-          var rgbImage = FrameConverter.convertCameraImageSync(frame);
+          // Extract plane bytes cheaply here (UI isolate); the actual
+          // YUV/BGRA -> RGB conversion + rotation + letterbox + decode all
+          // run off the UI isolate inside processCameraFrame.
+          final rawFrame = FrameConverter.extractRawFrame(
+            frame,
+            rotationDegrees: camera.sensorOrientation,
+          );
 
-          if (rgbImage != null && mounted) {
-            // Handle Camera Sensor Rotation
-            final sensorOrientation = camera.sensorOrientation;
-            if (sensorOrientation == 90) {
-              rgbImage = img.copyRotate(rgbImage, angle: 90);
-            } else if (sensorOrientation == 270) {
-              rgbImage = img.copyRotate(rgbImage, angle: 270);
-            }
-
-            // Run Inline YOLOv8-Seg Decoder Pipeline
-            final result = await _worker.processFrame(rgbImage);
+          if (rawFrame != null && mounted) {
+            final result = await _worker.processCameraFrame(rawFrame);
 
             if (mounted) {
               final smoothedPolygons = _polygonSmoother.smooth(result.polygons);
@@ -119,6 +120,11 @@ class _ArCameraPageState extends State<ArCameraPage> {
       });
     } catch (e) {
       debugPrint("⚠️ Lỗi khởi tạo Pipeline Camera AR: $e");
+      if (mounted) {
+        setState(() {
+          _initError = e.toString();
+        });
+      }
     }
   }
 
@@ -163,38 +169,73 @@ class _ArCameraPageState extends State<ArCameraPage> {
         ],
       ),
       body: !_isCameraReady || _controller == null || !_controller!.value.isInitialized
-          ? const Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  CircularProgressIndicator(),
-                  SizedBox(height: 16),
-                  Text('Đang khởi tạo Camera AR Stream & Ultralytics Pipeline...'),
-                ],
-              ),
+          ? Center(
+              child: _initError != null
+                  ? Padding(
+                      padding: const EdgeInsets.all(24.0),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          const Icon(Icons.error_outline, color: Colors.redAccent, size: 48),
+                          const SizedBox(height: 16),
+                          const Text(
+                            'Không khởi tạo được Camera AR',
+                            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                            textAlign: TextAlign.center,
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            _initError!,
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(fontSize: 12, color: Colors.grey),
+                          ),
+                          const SizedBox(height: 16),
+                          ElevatedButton.icon(
+                            onPressed: _startARPipeline,
+                            icon: const Icon(Icons.refresh),
+                            label: const Text('Thử lại'),
+                          ),
+                        ],
+                      ),
+                    )
+                  : const Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        CircularProgressIndicator(),
+                        SizedBox(height: 16),
+                        Text('Đang khởi tạo Camera AR Stream & Ultralytics Pipeline...'),
+                      ],
+                    ),
             )
           : Stack(
               children: [
-                // Live Camera Preview
+                // Live Camera Preview + AR Overlay, sharing one letterboxed box so
+                // polygon coordinates (in inference-frame space) always map 1:1
+                // onto the preview regardless of device screen aspect ratio.
                 Positioned.fill(
-                  child: AspectRatio(
-                    aspectRatio: _controller!.value.aspectRatio,
-                    child: CameraPreview(_controller!),
-                  ),
-                ),
-
-                // AR CustomPaint Overlay with CameraTransform Matrix Scaling
-                if (_nailPolygons.isNotEmpty)
-                  Positioned.fill(
-                    child: CustomPaint(
-                      painter: NailPainter(
-                        polygons: _nailPolygons,
-                        nailColor: _selectedColor,
-                        imageWidth: _frameWidth,
-                        imageHeight: _frameHeight,
+                  child: Center(
+                    child: AspectRatio(
+                      aspectRatio: (_frameWidth > 0 && _frameHeight > 0)
+                          ? _frameWidth / _frameHeight
+                          : _controller!.value.aspectRatio,
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          CameraPreview(_controller!),
+                          if (_nailPolygons.isNotEmpty)
+                            CustomPaint(
+                              painter: NailPainter(
+                                polygons: _nailPolygons,
+                                nailColor: _selectedColor,
+                                imageWidth: _frameWidth,
+                                imageHeight: _frameHeight,
+                              ),
+                            ),
+                        ],
                       ),
                     ),
                   ),
+                ),
 
                 // Top Info Bar (FPS & Latency)
                 Positioned(
