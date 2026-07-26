@@ -58,8 +58,8 @@ class YoloSegDecoder {
       }
 
       // Step 4b: Resample to a fixed-length, angle-canonical polygon. This
-      // smooths the pixel-stairstepped raw contour and gives every polygon
-      // the same point count/order so PolygonSmoother can blend across frames.
+      // smooths the pixel-stairstepped raw contour, which matters most for
+      // Snapshot Try-On (a single still shape with nothing to hide behind).
       polygon640 = PolygonResampler.resample(polygon640);
 
       // Step 5: Undo Letterbox to Original Image Coordinates

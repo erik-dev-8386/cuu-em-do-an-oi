@@ -1,13 +1,23 @@
 import 'dart:async';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
+import 'package:hand_landmarker/hand_landmarker.dart';
 
+import '../ai/nail_tracker.dart';
 import '../camera/frame_converter.dart';
 import '../camera/frame_scheduler.dart';
 import '../isolate/inference_worker.dart';
 
 import '../painter/nail_painter.dart';
-import 'polygon_smoother.dart';
+
+/// A 90/270 rotation (see `image` package's `copyRotate`) swaps width/height;
+/// 0/180 don't. Mirrors the same convention `frame_prep.dart` uses.
+Size _orientedSize(int sensorWidth, int sensorHeight, int rotationDegrees) {
+  final bool swapped = rotationDegrees == 90 || rotationDegrees == 270;
+  return swapped
+      ? Size(sensorHeight.toDouble(), sensorWidth.toDouble())
+      : Size(sensorWidth.toDouble(), sensorHeight.toDouble());
+}
 
 class ArCameraPage extends StatefulWidget {
   const ArCameraPage({super.key});
@@ -22,10 +32,30 @@ class _ArCameraPageState extends State<ArCameraPage> {
   int _selectedCameraIdx = 0;
 
   final InferenceWorker _worker = InferenceWorker();
-  // The heavy per-frame work now runs off the UI isolate (see InferenceWorker.processCameraFrame),
-  // so this only needs to bound worst-case throughput/battery use, not protect UI smoothness.
-  final FrameScheduler _scheduler = FrameScheduler(minFrameInterval: const Duration(milliseconds: 50));
-  final PolygonSmoother _polygonSmoother = PolygonSmoother(alpha: 0.4, minIouThreshold: 0.25);
+  // Confirmed on-device: running the YOLO pipeline back-to-back (previous
+  // 50ms interval was effectively a no-op, since a ~3.6s cycle always beats
+  // it) starves MediaPipe's hand tracking of CPU — landmarkStream updates
+  // went from a steady ~200ms with YOLO paused to bursty 69-2263ms with YOLO
+  // running continuously. This cooldown is measured from cycle *completion*
+  // (see FrameScheduler.markFree), giving MediaPipe genuine idle CPU time
+  // between YOLO cycles. Shape only needs refreshing every few seconds
+  // anyway, so trading YOLO frequency for tracking smoothness is a clear win.
+  final FrameScheduler _scheduler = FrameScheduler(minFrameInterval: const Duration(milliseconds: 2500));
+
+  // Nail *shape* comes from the slow YOLO pipeline below; nail *position*
+  // comes from MediaPipe hand landmarks, which update every camera frame —
+  // NailTracker re-projects the last known shape onto the current live
+  // fingertip position/orientation, so the overlay tracks the hand in real
+  // time even though the underlying segmentation only refreshes every few
+  // seconds. See docs/adr/0003-mediapipe-hand-tracking-for-live-position.md.
+  final NailTracker _nailTracker = NailTracker();
+  HandLandmarkerPlugin? _handLandmarker;
+  StreamSubscription<List<Hand>>? _handLandmarkSub;
+  List<Hand> _lastHands = [];
+
+  int _sensorWidth = 0;
+  int _sensorHeight = 0;
+  int _rotationDegrees = 0;
 
   bool _isCameraReady = false;
   String? _initError;
@@ -79,12 +109,57 @@ class _ArCameraPageState extends State<ArCameraPage> {
       await _controller!.initialize();
       if (!mounted) return;
 
+      _handLandmarker ??= HandLandmarkerPlugin.create(
+        // Root cause of the earlier laggy tracking wasn't the delegate choice
+        // — it was the YOLO pipeline running back-to-back and starving this
+        // of CPU (see _scheduler above). CPU delegate + a single hand (all we
+        // need for nail try-on) measured a steady ~200ms landmarkStream
+        // interval once that contention was fixed.
+        numHands: 1,
+        minHandDetectionConfidence: 0.6,
+        delegate: HandLandmarkerDelegate.cpu,
+      );
+      // This fires on (roughly) every camera frame — much faster than the
+      // YOLO pipeline — and is what actually drives the live-tracking feel:
+      // re-project whatever nail shapes NailTracker currently knows about
+      // onto the hand's current position/orientation.
+      _handLandmarkSub ??= _handLandmarker!.landmarkStream.listen((hands) {
+        if (!mounted || _sensorWidth == 0) return;
+        _lastHands = hands;
+        final rendered = _nailTracker.render(
+          hands: hands,
+          sensorWidth: _sensorWidth,
+          sensorHeight: _sensorHeight,
+          rotationDegrees: _rotationDegrees,
+        );
+        setState(() {
+          _nailPolygons = rendered;
+          _frameCount++;
+        });
+      });
+
       setState(() {
         _isCameraReady = true;
       });
 
       // 3. Start Camera Image Stream with FrameScheduler
       await _controller!.startImageStream((CameraImage frame) async {
+        _sensorWidth = frame.width;
+        _sensorHeight = frame.height;
+        _rotationDegrees = camera.sensorOrientation;
+        final oriented = _orientedSize(frame.width, frame.height, _rotationDegrees);
+        if (_frameWidth != oriented.width || _frameHeight != oriented.height) {
+          setState(() {
+            _frameWidth = oriented.width;
+            _frameHeight = oriented.height;
+          });
+        }
+
+        // Fire-and-forget: runs on its own native background thread, doesn't
+        // compete with the (much slower) nail-detection pipeline below, and
+        // is what keeps the overlay tracking the hand live (see above).
+        _handLandmarker?.processFrame(frame, camera.sensorOrientation);
+
         if (!_scheduler.shouldProcessFrame() || !mounted) return;
         _scheduler.markBusy();
 
@@ -101,14 +176,18 @@ class _ArCameraPageState extends State<ArCameraPage> {
             final result = await _worker.processCameraFrame(rawFrame);
 
             if (mounted) {
-              final smoothedPolygons = _polygonSmoother.smooth(result.polygons);
+              _nailTracker.updateFromDetections(
+                yoloPolygons: result.polygons,
+                hands: _lastHands,
+                sensorWidth: frame.width,
+                sensorHeight: frame.height,
+                rotationDegrees: camera.sensorOrientation,
+                maxMatchDistance: 0.18 *
+                    (result.originalWidth < result.originalHeight ? result.originalWidth : result.originalHeight),
+              );
 
               setState(() {
-                _nailPolygons = smoothedPolygons;
-                _frameWidth = result.originalWidth.toDouble();
-                _frameHeight = result.originalHeight.toDouble();
                 _lastInferenceTime = result.inferenceTime;
-                _frameCount++;
               });
             }
           }
@@ -130,8 +209,9 @@ class _ArCameraPageState extends State<ArCameraPage> {
 
   void _switchCamera() async {
     if (_cameras.length < 2) return;
-    _polygonSmoother.reset();
+    _nailTracker.reset();
     _scheduler.reset();
+    _lastHands = [];
     setState(() {
       _isCameraReady = false;
       _selectedCameraIdx = (_selectedCameraIdx + 1) % _cameras.length;
@@ -152,6 +232,8 @@ class _ArCameraPageState extends State<ArCameraPage> {
     }
     _controller?.dispose();
     _worker.dispose();
+    _handLandmarkSub?.cancel();
+    _handLandmarker?.dispose();
     super.dispose();
   }
 
