@@ -4,6 +4,7 @@ import 'package:image/image.dart' as img;
 
 class LetterboxResult {
   final Float32List tensor;
+  final int targetSize;
   final double scale;
   final double padLeft;
   final double padTop;
@@ -12,6 +13,7 @@ class LetterboxResult {
 
   LetterboxResult({
     required this.tensor,
+    required this.targetSize,
     required this.scale,
     required this.padLeft,
     required this.padTop,
@@ -22,15 +24,23 @@ class LetterboxResult {
 
 class ImageProcessor {
   /// Chạy xử lý ảnh LetterBox trên luồng ngầm (Isolate) cho ảnh tĩnh Snapshot
-  static Future<LetterboxResult> imageToTensorAsync(img.Image inputImage) async {
-    return await compute(imageToTensorSync, inputImage);
+  static Future<LetterboxResult> imageToTensorAsync(
+    img.Image inputImage, {
+    int targetSize = 640,
+  }) async {
+    return await compute(
+      _imageToTensorFromRequest,
+      _ImageTensorRequest(inputImage: inputImage, targetSize: targetSize),
+    );
   }
 
   /// Chạy xử lý ảnh LetterBox đồng bộ (Direct Inline) cho luồng Realtime Camera Stream
-  static LetterboxResult imageToTensorSync(img.Image inputImage) {
+  static LetterboxResult imageToTensorSync(
+    img.Image inputImage, {
+    int targetSize = 640,
+  }) {
     final int imgW = inputImage.width;
     final int imgH = inputImage.height;
-    const int targetSize = 640;
 
     final double scale = min(targetSize / imgW, targetSize / imgH);
     final int newW = (imgW * scale).round();
@@ -41,12 +51,14 @@ class ImageProcessor {
 
     final resizedImage = img.copyResize(inputImage, width: newW, height: newH);
 
-    final Float32List float32List = Float32List(1 * 3 * targetSize * targetSize);
+    final Float32List float32List = Float32List(
+      1 * 3 * targetSize * targetSize,
+    );
     // Điền màu xám 114 chuẩn Ultralytics LetterBox
     final double fillValue = 114.0 / 255.0;
     float32List.fillRange(0, float32List.length, fillValue);
 
-    const int channelStride = targetSize * targetSize;
+    final int channelStride = targetSize * targetSize;
 
     for (int y = 0; y < newH; y++) {
       final int tensorY = (padTop + y).toInt();
@@ -67,6 +79,7 @@ class ImageProcessor {
 
     return LetterboxResult(
       tensor: float32List,
+      targetSize: targetSize,
       scale: scale,
       padLeft: padLeft,
       padTop: padTop,
@@ -74,4 +87,23 @@ class ImageProcessor {
       originalHeight: imgH,
     );
   }
+
+  static LetterboxResult _imageToTensorFromRequest(
+    _ImageTensorRequest request,
+  ) {
+    return imageToTensorSync(
+      request.inputImage,
+      targetSize: request.targetSize,
+    );
+  }
+}
+
+class _ImageTensorRequest {
+  final img.Image inputImage;
+  final int targetSize;
+
+  const _ImageTensorRequest({
+    required this.inputImage,
+    required this.targetSize,
+  });
 }

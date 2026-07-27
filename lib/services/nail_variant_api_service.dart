@@ -8,7 +8,22 @@ class NailVariantApiService {
   /// Fetch list of NailVariants from Backend (`GET /api/NailVariants`)
   static Future<List<NailVariant>> fetchNailVariants({
     int pageNumber = 1,
-    int pageSize = 50,
+    int pageSize = 10,
+    int? nailDesignId,
+    String? name,
+  }) async {
+    return fetchPagedNailVariants(
+      pageNumber: pageNumber,
+      pageSize: pageSize,
+      nailDesignId: nailDesignId,
+      name: name,
+    );
+  }
+
+  /// Alias for fetchNailVariants matching API DTO specification
+  static Future<List<NailVariant>> fetchPagedNailVariants({
+    int pageNumber = 1,
+    int pageSize = 10,
     int? nailDesignId,
     String? name,
   }) async {
@@ -23,21 +38,30 @@ class NailVariantApiService {
       queryParams['name'] = name;
     }
 
-    final Uri url = Uri.parse(ApiConfig.nailVariantsEndpoint).replace(queryParameters: queryParams);
+    final Uri url = Uri.parse(
+      ApiConfig.nailVariantsEndpoint,
+    ).replace(queryParameters: queryParams);
 
     try {
       debugPrint('📡 [NailVariantApiService] GET: $url');
-      final response = await http.get(url).timeout(const Duration(seconds: 4));
+      final response = await http.get(
+        url,
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+        },
+      ).timeout(const Duration(seconds: 15)); // Tăng timeout cho Render
 
       if (response.statusCode == 200) {
-        final decoded = json.decode(response.body);
+        final decoded = json.decode(utf8.decode(response.bodyBytes));
         List<dynamic> itemsJson = [];
 
         if (decoded is Map<String, dynamic>) {
           // Parse ApiResult<PagedList<NailVariantDto>>
           if (decoded['isSucceeded'] == true && decoded.containsKey('data')) {
             final dataObj = decoded['data'];
-            if (dataObj is Map<String, dynamic> && dataObj.containsKey('items')) {
+            if (dataObj is Map<String, dynamic> &&
+                dataObj.containsKey('items')) {
               itemsJson = dataObj['items'] as List<dynamic>;
             } else if (dataObj is List) {
               itemsJson = dataObj;
@@ -51,38 +75,99 @@ class NailVariantApiService {
 
         if (itemsJson.isNotEmpty) {
           final variants = itemsJson
-              .map((item) => NailVariant.fromJson(item as Map<String, dynamic>))
+              .map(
+                (item) => NailVariant.fromApiJson(
+              item as Map<String, dynamic>,
+              baseUrl: ApiConfig.baseUrl,
+            ),
+          )
               .toList();
-          debugPrint('✅ [NailVariantApiService] Successfully fetched ${variants.length} NailVariants');
+          debugPrint(
+            '✅ [NailVariantApiService] Successfully fetched ${variants.length} NailVariants',
+          );
           return variants;
         }
       } else {
-        debugPrint('⚠️ [NailVariantApiService] API error HTTP ${response.statusCode}');
+        debugPrint(
+          '⚠️ [NailVariantApiService] API error HTTP ${response.statusCode}',
+        );
       }
     } catch (e) {
       debugPrint('⚠️ [NailVariantApiService] Network exception: $e');
     }
 
-    debugPrint('ℹ️ [NailVariantApiService] Returning preset variants fallback.');
+    debugPrint(
+      'ℹ️ [NailVariantApiService] Returning preset variants fallback.',
+    );
     return getPresetVariants();
+  }
+
+  /// Fetch one complete variant configuration (`GET /api/NailVariants/{id}`)
+  static Future<NailVariant?> fetchNailVariantById(int id) async {
+    final Uri url = Uri.parse(ApiConfig.nailVariantDetailEndpoint(id));
+
+    try {
+      debugPrint('[NailVariantApiService] GET detail: $url');
+      final response = await http.get(
+        url,
+        headers: {'Accept': 'application/json'},
+      ).timeout(const Duration(seconds: 15));
+
+      if (response.statusCode == 200) {
+        final decoded = json.decode(utf8.decode(response.bodyBytes));
+        Map<String, dynamic>? itemJson;
+
+        if (decoded is Map<String, dynamic>) {
+          if (decoded['isSucceeded'] == true &&
+              decoded['data'] is Map<String, dynamic>) {
+            itemJson = decoded['data'] as Map<String, dynamic>;
+          } else if (decoded.containsKey('nailVariantId')) {
+            itemJson = decoded;
+          }
+        }
+
+        if (itemJson != null) {
+          return NailVariant.fromApiJson(itemJson, baseUrl: ApiConfig.baseUrl);
+        }
+      } else {
+        debugPrint(
+          '[NailVariantApiService] Detail API error HTTP ${response.statusCode}',
+        );
+      }
+    } catch (e) {
+      debugPrint('[NailVariantApiService] Error fetching variant detail: $e');
+    }
+
+    return null;
   }
 
   /// Fetch capable nail variants for a specific artist (`GET /api/NailVariants/capable-by-artist/{artistId}`)
   static Future<List<NailVariant>> fetchCapableVariants(String artistId) async {
     final Uri url = Uri.parse(ApiConfig.capableNailVariantsEndpoint(artistId));
     try {
-      final response = await http.get(url).timeout(const Duration(seconds: 4));
+      final response = await http.get(
+        url,
+        headers: {'Accept': 'application/json'},
+      ).timeout(const Duration(seconds: 15));
+
       if (response.statusCode == 200) {
-        final decoded = json.decode(response.body);
+        final decoded = json.decode(utf8.decode(response.bodyBytes));
         if (decoded is Map<String, dynamic> && decoded['data'] is List) {
           final itemsJson = decoded['data'] as List<dynamic>;
           return itemsJson
-              .map((item) => NailVariant.fromJson(item as Map<String, dynamic>))
+              .map(
+                (item) => NailVariant.fromApiJson(
+              item as Map<String, dynamic>,
+              baseUrl: ApiConfig.baseUrl,
+            ),
+          )
               .toList();
         }
       }
     } catch (e) {
-      debugPrint('⚠️ [NailVariantApiService] Error fetching artist capable variants: $e');
+      debugPrint(
+        '⚠️ [NailVariantApiService] Error fetching artist capable variants: $e',
+      );
     }
     return getPresetVariants();
   }

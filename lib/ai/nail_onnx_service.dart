@@ -2,19 +2,18 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:onnxruntime/onnxruntime.dart';
 import 'package:image/image.dart' as img;
+import '../config/model_assets.dart';
 import 'image_processor.dart';
 
 class NailOnnxInferenceResult {
   final List<OrtValue?>? outputs;
   final LetterboxResult letterbox;
 
-  NailOnnxInferenceResult({
-    required this.outputs,
-    required this.letterbox,
-  });
+  NailOnnxInferenceResult({required this.outputs, required this.letterbox});
 }
 
 class NailOnnxService {
+  static const int modelInputSize = 416;
   OrtSession? _session;
 
   Future<void> initModel() async {
@@ -23,22 +22,28 @@ class NailOnnxService {
     OrtEnv.instance.init();
     final sessionOptions = OrtSessionOptions();
 
-    final rawBytes = await rootBundle.load('assets/models/best.onnx');
+    final rawBytes = await rootBundle.load(ModelAssets.nailSegOnnx);
     final bytes = rawBytes.buffer.asUint8List();
 
     _session = OrtSession.fromBuffer(bytes, sessionOptions);
   }
 
-  Future<NailOnnxInferenceResult> processImage(img.Image rawImage, {bool isSync = false}) async {
+  Future<NailOnnxInferenceResult> processImage(
+    img.Image rawImage, {
+    bool isSync = false,
+  }) async {
     await initModel();
 
     final letterboxResult = isSync
-        ? ImageProcessor.imageToTensorSync(rawImage)
-        : await ImageProcessor.imageToTensorAsync(rawImage);
+        ? ImageProcessor.imageToTensorSync(rawImage, targetSize: modelInputSize)
+        : await ImageProcessor.imageToTensorAsync(
+            rawImage,
+            targetSize: modelInputSize,
+          );
 
     final inputOrt = OrtValueTensor.createTensorWithDataList(
       letterboxResult.tensor,
-      [1, 3, 640, 640],
+      [1, 3, modelInputSize, modelInputSize],
     );
 
     String inputName = 'images';

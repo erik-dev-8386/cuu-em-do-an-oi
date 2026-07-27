@@ -5,8 +5,8 @@ import 'package:image/image.dart' as img;
 
 import '../isolate/inference_worker.dart';
 import '../models/nail_variant.dart';
-import '../painter/nail_painter.dart';
 import '../services/nail_variant_api_service.dart';
+import '../widgets/nail_try_on_overlay.dart';
 import '../widgets/nail_variant_card.dart';
 
 class NailSnapshotPage extends StatefulWidget {
@@ -22,7 +22,8 @@ class _NailSnapshotPageState extends State<NailSnapshotPage> {
   bool _isLoadingVariants = false;
   final InferenceWorker _worker = InferenceWorker();
   List<List<Offset>> _nailPolygons = [];
-  
+  final Map<int, NailVariant> _variantDetailsCache = {};
+
   late List<NailVariant> _variants;
   late NailVariant _selectedVariant;
 
@@ -33,7 +34,6 @@ class _NailSnapshotPageState extends State<NailSnapshotPage> {
   @override
   void initState() {
     super.initState();
-    _worker.init();
     _variants = NailVariantApiService.getPresetVariants();
     _selectedVariant = _variants.first;
     _loadVariantsFromApi();
@@ -45,7 +45,9 @@ class _NailSnapshotPageState extends State<NailSnapshotPage> {
     if (mounted && fetched.isNotEmpty) {
       setState(() {
         _variants = fetched;
-        if (!_variants.contains(_selectedVariant)) {
+        if (!_variants.any(
+          (item) => item.nailVariantId == _selectedVariant.nailVariantId,
+        )) {
           _selectedVariant = fetched.first;
         }
         _isLoadingVariants = false;
@@ -77,6 +79,7 @@ class _NailSnapshotPageState extends State<NailSnapshotPage> {
   Future<void> _processSelectedImage() async {
     if (_imageFile == null) return;
 
+    await _worker.init();
     final imageBytes = await _imageFile!.readAsBytes();
     final decodedImage = img.decodeImage(imageBytes);
 
@@ -86,7 +89,10 @@ class _NailSnapshotPageState extends State<NailSnapshotPage> {
         _imgHeight = decodedImage.height.toDouble();
       });
 
-      final result = await _worker.processFrame(decodedImage);
+      final result = await _worker.processFrame(
+        decodedImage,
+        useAsyncPreprocess: true,
+      );
 
       if (!mounted) return;
 
@@ -115,6 +121,39 @@ class _NailSnapshotPageState extends State<NailSnapshotPage> {
     );
   }
 
+  Future<void> _selectVariant(NailVariant variant) async {
+    setState(() {
+      _selectedVariant = variant;
+    });
+
+    final cached = _variantDetailsCache[variant.nailVariantId];
+    if (cached != null) {
+      if (mounted && _selectedVariant.nailVariantId == cached.nailVariantId) {
+        setState(() => _selectedVariant = cached);
+      }
+      return;
+    }
+
+    final detailed = await NailVariantApiService.fetchNailVariantById(
+      variant.nailVariantId,
+    );
+    if (detailed == null || !mounted) return;
+
+    _variantDetailsCache[detailed.nailVariantId] = detailed;
+    final index = _variants.indexWhere(
+      (item) => item.nailVariantId == detailed.nailVariantId,
+    );
+
+    setState(() {
+      if (index >= 0) {
+        _variants[index] = detailed;
+      }
+      if (_selectedVariant.nailVariantId == detailed.nailVariantId) {
+        _selectedVariant = detailed;
+      }
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -134,7 +173,23 @@ class _NailSnapshotPageState extends State<NailSnapshotPage> {
                 padding: const EdgeInsets.only(right: 16.0),
                 child: Text(
                   '${_lastInferenceDuration!.inMilliseconds}ms',
-                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+                  style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ),
+          if (_lastInferenceDuration != null)
+            Center(
+              child: Padding(
+                padding: const EdgeInsets.only(right: 16.0),
+                child: Text(
+                  'Nails: ${_nailPolygons.length}',
+                  style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                  ),
                 ),
               ),
             ),
@@ -150,11 +205,18 @@ class _NailSnapshotPageState extends State<NailSnapshotPage> {
                       ? const Column(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
-                            Icon(Icons.photo_camera_outlined, size: 64, color: Colors.grey),
+                            Icon(
+                              Icons.photo_camera_outlined,
+                              size: 64,
+                              color: Colors.grey,
+                            ),
                             SizedBox(height: 12),
                             Text(
                               'Vui lòng chọn hoặc chụp ảnh bàn tay để bắt đầu thử móng',
-                              style: TextStyle(color: Colors.grey, fontSize: 14),
+                              style: TextStyle(
+                                color: Colors.grey,
+                                fontSize: 14,
+                              ),
                             ),
                           ],
                         )
@@ -168,15 +230,15 @@ class _NailSnapshotPageState extends State<NailSnapshotPage> {
                                 Image.file(_imageFile!),
                                 if (_nailPolygons.isNotEmpty)
                                   Positioned.fill(
-                                    child: CustomPaint(
-                                      painter: NailPainter(
-                                        polygons: _nailPolygons,
-                                        variant: _selectedVariant,
-                                      ),
+                                    child: NailTryOnOverlay(
+                                      polygons: _nailPolygons,
+                                      variant: _selectedVariant,
                                     ),
                                   ),
                                 if (_isProcessing)
-                                  const Center(child: CircularProgressIndicator()),
+                                  const Center(
+                                    child: CircularProgressIndicator(),
+                                  ),
                               ],
                             ),
                           ),
@@ -189,10 +251,15 @@ class _NailSnapshotPageState extends State<NailSnapshotPage> {
                   right: 16,
                   child: Card(
                     elevation: 6,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
                     color: Colors.white.withValues(alpha: 0.92),
                     child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 10,
+                      ),
                       child: Row(
                         children: [
                           Container(
@@ -203,9 +270,10 @@ class _NailSnapshotPageState extends State<NailSnapshotPage> {
                               shape: BoxShape.circle,
                               boxShadow: [
                                 BoxShadow(
-                                  color: _selectedVariant.primaryColor.withValues(alpha: 0.4),
+                                  color: _selectedVariant.primaryColor
+                                      .withValues(alpha: 0.4),
                                   blurRadius: 6,
-                                )
+                                ),
                               ],
                             ),
                           ),
@@ -227,7 +295,10 @@ class _NailSnapshotPageState extends State<NailSnapshotPage> {
                                 const SizedBox(height: 2),
                                 Text(
                                   'Form: ${_selectedVariant.shapeName} • Bề mặt: ${_selectedVariant.surfaceName}',
-                                  style: TextStyle(fontSize: 11, color: Colors.grey.shade700),
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: Colors.grey.shade700,
+                                  ),
                                 ),
                               ],
                             ),
@@ -246,7 +317,10 @@ class _NailSnapshotPageState extends State<NailSnapshotPage> {
                               ),
                               Text(
                                 '${_selectedVariant.duration} phút',
-                                style: const TextStyle(fontSize: 11, color: Colors.grey),
+                                style: const TextStyle(
+                                  fontSize: 11,
+                                  color: Colors.grey,
+                                ),
                               ),
                             ],
                           ),
@@ -268,7 +342,11 @@ class _NailSnapshotPageState extends State<NailSnapshotPage> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Padding(
-                  padding: const EdgeInsets.only(left: 16, bottom: 2, right: 16),
+                  padding: const EdgeInsets.only(
+                    left: 16,
+                    bottom: 2,
+                    right: 16,
+                  ),
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
@@ -299,12 +377,10 @@ class _NailSnapshotPageState extends State<NailSnapshotPage> {
                       final item = _variants[index];
                       return NailVariantCard(
                         variant: item,
-                        isSelected: item.nailVariantId == _selectedVariant.nailVariantId,
-                        onTap: () {
-                          setState(() {
-                            _selectedVariant = item;
-                          });
-                        },
+                        isSelected:
+                            item.nailVariantId ==
+                            _selectedVariant.nailVariantId,
+                        onTap: () => _selectVariant(item),
                       );
                     },
                   ),
@@ -322,29 +398,62 @@ class _NailSnapshotPageState extends State<NailSnapshotPage> {
               children: [
                 ElevatedButton.icon(
                   onPressed: () => _pickImage(ImageSource.camera),
-                  icon: const Icon(Icons.camera_alt, color: Colors.white, size: 18),
-                  label: const Text('Chụp ảnh', style: TextStyle(color: Colors.white)),
+                  icon: const Icon(
+                    Icons.camera_alt,
+                    color: Colors.white,
+                    size: 18,
+                  ),
+                  label: const Text(
+                    'Chụp ảnh',
+                    style: TextStyle(color: Colors.white),
+                  ),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: const Color(0xFFFF4081),
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 10,
+                    ),
                   ),
                 ),
                 ElevatedButton.icon(
                   onPressed: () => _pickImage(ImageSource.gallery),
-                  icon: const Icon(Icons.photo_library, color: Colors.white, size: 18),
-                  label: const Text('Chọn ảnh', style: TextStyle(color: Colors.white)),
+                  icon: const Icon(
+                    Icons.photo_library,
+                    color: Colors.white,
+                    size: 18,
+                  ),
+                  label: const Text(
+                    'Chọn ảnh',
+                    style: TextStyle(color: Colors.white),
+                  ),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: const Color(0xFFAB47BC),
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 10,
+                    ),
                   ),
                 ),
                 ElevatedButton.icon(
                   onPressed: () => _onBookVariant(_selectedVariant),
-                  icon: const Icon(Icons.calendar_month, color: Colors.white, size: 18),
-                  label: const Text('Đặt lịch', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                  icon: const Icon(
+                    Icons.calendar_month,
+                    color: Colors.white,
+                    size: 18,
+                  ),
+                  label: const Text(
+                    'Đặt lịch',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.green.shade600,
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 10,
+                    ),
                   ),
                 ),
               ],

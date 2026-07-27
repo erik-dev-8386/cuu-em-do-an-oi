@@ -13,7 +13,7 @@ class NailVariantCard extends StatelessWidget {
     required this.onTap,
   });
 
-  bool get isFromApi => variant.nailVariantId < 100;
+  bool get isFromApi => variant.isRemote;
 
   @override
   Widget build(BuildContext context) {
@@ -56,29 +56,31 @@ class NailVariantCard extends StatelessWidget {
                       width: 38,
                       height: 38,
                       decoration: BoxDecoration(
-                        color: variant.primaryColor,
+                        color: _thumbnailGradient == null
+                            ? variant.primaryColor
+                            : null,
+                        gradient: _thumbnailGradient,
                         shape: BoxShape.circle,
                         boxShadow: [
                           BoxShadow(
                             color: variant.primaryColor.withValues(alpha: 0.4),
                             blurRadius: 5,
                             offset: const Offset(0, 2),
-                          )
+                          ),
                         ],
                       ),
-                      child: variant.imageUrl.isNotEmpty
+                      child: _thumbnailUrl.isNotEmpty
                           ? ClipOval(
                               child: Image.network(
-                                variant.imageUrl,
+                                _thumbnailUrl,
                                 fit: BoxFit.cover,
-                                errorBuilder: (context, error, stackTrace) => Container(
-                                  color: variant.primaryColor,
-                                ),
+                                errorBuilder: (context, error, stackTrace) =>
+                                    Container(color: variant.primaryColor),
                               ),
                             )
                           : null,
                     ),
-                    if (variant.imageUrl.isEmpty) ...[
+                    if (_thumbnailUrl.isEmpty) ...[
                       if (variant.surfaceType == SurfaceType.matte)
                         Container(
                           width: 38,
@@ -100,9 +102,17 @@ class NailVariantCard extends StatelessWidget {
                           ),
                         )
                       else if (variant.surfaceType == SurfaceType.chrome)
-                        const Icon(Icons.auto_awesome, color: Colors.white, size: 18)
+                        const Icon(
+                          Icons.auto_awesome,
+                          color: Colors.white,
+                          size: 18,
+                        )
                       else if (variant.surfaceType == SurfaceType.holographic)
-                        const Icon(Icons.wb_sunny_outlined, color: Colors.white, size: 18)
+                        const Icon(
+                          Icons.wb_sunny_outlined,
+                          color: Colors.white,
+                          size: 18,
+                        )
                       else if (variant.surfaceType == SurfaceType.pearl)
                         const Icon(Icons.blur_on, color: Colors.white, size: 18)
                       else if (variant.surfaceType == SurfaceType.satin)
@@ -111,15 +121,19 @@ class NailVariantCard extends StatelessWidget {
                   ],
                 ),
                 const SizedBox(height: 4),
-                // Shape Name Chip
+                // Variant name
                 Text(
-                  variant.shapeName ?? 'Almond',
+                  variant.name,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                    fontSize: 10,
-                    fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-                    color: isSelected ? const Color(0xFFFF4081) : Colors.black87,
+                    fontSize: 9,
+                    fontWeight: isSelected
+                        ? FontWeight.bold
+                        : FontWeight.normal,
+                    color: isSelected
+                        ? const Color(0xFFFF4081)
+                        : Colors.black87,
                   ),
                 ),
                 const SizedBox(height: 1),
@@ -140,7 +154,10 @@ class NailVariantCard extends StatelessWidget {
                 top: 0,
                 right: 0,
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 4,
+                    vertical: 1,
+                  ),
                   decoration: BoxDecoration(
                     color: Colors.green.shade600,
                     borderRadius: BorderRadius.circular(6),
@@ -159,5 +176,28 @@ class NailVariantCard extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  Gradient? get _thumbnailGradient {
+    if (variant.colorMode == NailColorMode.gradient &&
+        variant.gradientColors.length > 1) {
+      return LinearGradient(
+        colors: variant.gradientColors,
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+      );
+    }
+
+    if (variant.colorMode == NailColorMode.perFinger &&
+        variant.perFingerColors.length > 1) {
+      return SweepGradient(colors: variant.perFingerColors.values.toList());
+    }
+
+    return null;
+  }
+
+  String get _thumbnailUrl {
+    if (variant.imageUrl.isNotEmpty) return variant.imageUrl;
+    return variant.shapeImageUrl;
   }
 }

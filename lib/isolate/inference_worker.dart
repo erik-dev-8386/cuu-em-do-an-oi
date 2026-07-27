@@ -31,19 +31,28 @@ class InferenceWorker {
     img.Image frameImage, {
     double confThreshold = 0.35,
     double iouThreshold = 0.45,
-    double maskThreshold = 0.5,
+    double maskThreshold = 0.40,
+    bool useAsyncPreprocess = false,
   }) async {
     final stopwatch = Stopwatch()..start();
     await init();
 
-    final rawOutputs = await _onnxService.runInference(frameImage);
+    final rawOutputs = await _onnxService.runInference(
+      frameImage,
+      useAsyncPreprocess: useAsyncPreprocess,
+    );
 
-    final polygons = YoloSegDecoder.decode(
+    var polygons = YoloSegDecoder.decode(
       rawOutputs: rawOutputs,
       confThreshold: confThreshold,
       iouThreshold: iouThreshold,
       maskThreshold: maskThreshold,
     );
+
+    // Disable FallbackNailDetector by default to avoid drawing fake nails on human faces/foreheads
+    // if (polygons.isEmpty) {
+    //   polygons = FallbackNailDetector.estimate(frameImage);
+    // }
 
     stopwatch.stop();
 

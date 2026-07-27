@@ -33,24 +33,35 @@ class MainHomeScreen extends StatefulWidget {
 
 class _MainHomeScreenState extends State<MainHomeScreen> {
   int _currentIndex = 0;
+  final Set<int> _visitedTabs = {0};
 
-  final List<Widget> _pages = const [
-    NailSnapshotPage(),
-    ArCameraPage(),
-  ];
+  Widget _buildTab(int index) {
+    if (!_visitedTabs.contains(index)) {
+      return const SizedBox.shrink();
+    }
+
+    return switch (index) {
+      0 => const NailSnapshotPage(),
+      1 => const ArCameraPage(),
+      _ => const SizedBox.shrink(),
+    };
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: IndexedStack(
         index: _currentIndex,
-        children: _pages,
+        children: List.generate(2, _buildTab),
       ),
       bottomNavigationBar: BottomNavigationBar(
         currentIndex: _currentIndex,
         selectedItemColor: const Color(0xFFFF4081),
         unselectedItemColor: Colors.grey,
-        onTap: (index) => setState(() => _currentIndex = index),
+        onTap: (index) => setState(() {
+          _currentIndex = index;
+          _visitedTabs.add(index);
+        }),
         items: const [
           BottomNavigationBarItem(
             icon: Icon(Icons.photo_library),

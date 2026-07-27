@@ -30,23 +30,30 @@ class NailInferenceService {
   /// Entry point for both Snapshot (photo) and AR (camera frame) inference
   Future<NailInferenceResult> processImage(
     img.Image rawImage, {
-    double confThreshold = 0.35,
+    double confThreshold = 0.12,
     double iouThreshold = 0.45,
-    double maskThreshold = 0.5,
+    double maskThreshold = 0.35,
     bool isSync = false,
   }) async {
     final stopwatch = Stopwatch()..start();
     await init();
 
-    final onnxResult = await _onnxService.processImage(rawImage, isSync: isSync);
+    final onnxResult = await _onnxService.processImage(
+      rawImage,
+      isSync: isSync,
+    );
 
-    final polygons = NailPostProcessor.decodeOutputs(
+    var polygons = NailPostProcessor.decodeOutputs(
       outputs: onnxResult.outputs,
       letterbox: onnxResult.letterbox,
       confThreshold: confThreshold,
       iouThreshold: iouThreshold,
       maskThreshold: maskThreshold,
     );
+    // Disable FallbackNailDetector by default to prevent drawing fake nails on skin/faces
+    // if (polygons.isEmpty) {
+    //   polygons = FallbackNailDetector.estimate(rawImage);
+    // }
 
     stopwatch.stop();
 

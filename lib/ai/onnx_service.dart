@@ -1,7 +1,8 @@
 import 'package:flutter/services.dart';
 import 'package:onnxruntime/onnxruntime.dart';
 import 'package:image/image.dart' as img;
-import 'letterbox.dart';
+import '../config/model_assets.dart';
+import 'image_processor.dart';
 
 class YoloSegOutputs {
   final dynamic pred; // Output0 [1, 37, 8400] or [1, 8400, 37]
@@ -16,6 +17,7 @@ class YoloSegOutputs {
 }
 
 class OnnxService {
+  static const int modelInputSize = 416;
   OrtSession? _session;
 
   Future<void> initModel() async {
@@ -24,20 +26,31 @@ class OnnxService {
     OrtEnv.instance.init();
     final sessionOptions = OrtSessionOptions();
 
-    final rawBytes = await rootBundle.load('assets/models/best.onnx');
+    final rawBytes = await rootBundle.load(ModelAssets.nailSegOnnx);
     final bytes = rawBytes.buffer.asUint8List();
 
     _session = OrtSession.fromBuffer(bytes, sessionOptions);
   }
 
-  Future<YoloSegOutputs> runInference(img.Image rawImage) async {
+  Future<YoloSegOutputs> runInference(
+    img.Image rawImage, {
+    bool useAsyncPreprocess = false,
+  }) async {
     await initModel();
 
-    final letterboxResult = LetterboxProcessor.process(rawImage);
+    final letterboxResult = useAsyncPreprocess
+        ? await ImageProcessor.imageToTensorAsync(
+            rawImage,
+            targetSize: modelInputSize,
+          )
+        : ImageProcessor.imageToTensorSync(
+            rawImage,
+            targetSize: modelInputSize,
+          );
 
     final inputOrt = OrtValueTensor.createTensorWithDataList(
       letterboxResult.tensor,
-      [1, 3, 640, 640],
+      [1, 3, modelInputSize, modelInputSize],
     );
 
     String inputName = 'images';

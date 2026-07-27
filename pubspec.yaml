@@ -27,6 +27,5 @@ dev_dependencies:
 flutter:
   uses-material-design: true
 
-  # Khai báo file best.onnx tại đây:
   assets:
-    - assets/models/best.onnx
+    - assets/models/

@@ -8,8 +8,8 @@ import '../camera/frame_scheduler.dart';
 import '../isolate/inference_worker.dart';
 
 import '../models/nail_variant.dart';
-import '../painter/nail_painter.dart';
 import '../services/nail_variant_api_service.dart';
+import '../widgets/nail_try_on_overlay.dart';
 import '../widgets/nail_variant_card.dart';
 import 'polygon_smoother.dart';
 
@@ -26,12 +26,18 @@ class _ArCameraPageState extends State<ArCameraPage> {
   int _selectedCameraIdx = 0;
 
   final InferenceWorker _worker = InferenceWorker();
-  final FrameScheduler _scheduler = FrameScheduler(minFrameInterval: const Duration(milliseconds: 90));
-  final PolygonSmoother _polygonSmoother = PolygonSmoother(alpha: 0.4, minIouThreshold: 0.25);
+  final FrameScheduler _scheduler = FrameScheduler(
+    minFrameInterval: const Duration(milliseconds: 90),
+  );
+  final PolygonSmoother _polygonSmoother = PolygonSmoother(
+    alpha: 0.4,
+    minIouThreshold: 0.25,
+  );
 
   bool _isCameraReady = false;
   bool _isLoadingVariants = false;
   List<List<Offset>> _nailPolygons = [];
+  final Map<int, NailVariant> _variantDetailsCache = {};
 
   late List<NailVariant> _variants;
   late NailVariant _selectedVariant;
@@ -69,7 +75,9 @@ class _ArCameraPageState extends State<ArCameraPage> {
     if (mounted && fetched.isNotEmpty) {
       setState(() {
         _variants = fetched;
-        if (!_variants.contains(_selectedVariant)) {
+        if (!_variants.any(
+          (item) => item.nailVariantId == _selectedVariant.nailVariantId,
+        )) {
           _selectedVariant = fetched.first;
         }
         _isLoadingVariants = false;
@@ -172,6 +180,39 @@ class _ArCameraPageState extends State<ArCameraPage> {
     );
   }
 
+  Future<void> _selectVariant(NailVariant variant) async {
+    setState(() {
+      _selectedVariant = variant;
+    });
+
+    final cached = _variantDetailsCache[variant.nailVariantId];
+    if (cached != null) {
+      if (mounted && _selectedVariant.nailVariantId == cached.nailVariantId) {
+        setState(() => _selectedVariant = cached);
+      }
+      return;
+    }
+
+    final detailed = await NailVariantApiService.fetchNailVariantById(
+      variant.nailVariantId,
+    );
+    if (detailed == null || !mounted) return;
+
+    _variantDetailsCache[detailed.nailVariantId] = detailed;
+    final index = _variants.indexWhere(
+      (item) => item.nailVariantId == detailed.nailVariantId,
+    );
+
+    setState(() {
+      if (index >= 0) {
+        _variants[index] = detailed;
+      }
+      if (_selectedVariant.nailVariantId == detailed.nailVariantId) {
+        _selectedVariant = detailed;
+      }
+    });
+  }
+
   @override
   void dispose() {
     _fpsTimer?.cancel();
@@ -202,7 +243,10 @@ class _ArCameraPageState extends State<ArCameraPage> {
           ),
         ],
       ),
-      body: !_isCameraReady || _controller == null || !_controller!.value.isInitialized
+      body:
+          !_isCameraReady ||
+              _controller == null ||
+              !_controller!.value.isInitialized
           ? const Center(
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
@@ -226,13 +270,11 @@ class _ArCameraPageState extends State<ArCameraPage> {
                 // AR CustomPaint Overlay
                 if (_nailPolygons.isNotEmpty)
                   Positioned.fill(
-                    child: CustomPaint(
-                      painter: NailPainter(
-                        polygons: _nailPolygons,
-                        variant: _selectedVariant,
-                        imageWidth: _frameWidth,
-                        imageHeight: _frameHeight,
-                      ),
+                    child: NailTryOnOverlay(
+                      polygons: _nailPolygons,
+                      variant: _selectedVariant,
+                      imageWidth: _frameWidth,
+                      imageHeight: _frameHeight,
                     ),
                   ),
 
@@ -245,7 +287,10 @@ class _ArCameraPageState extends State<ArCameraPage> {
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 6,
+                        ),
                         decoration: BoxDecoration(
                           color: Colors.black.withValues(alpha: 0.65),
                           borderRadius: BorderRadius.circular(20),
@@ -253,10 +298,14 @@ class _ArCameraPageState extends State<ArCameraPage> {
                         child: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            const Icon(Icons.speed, color: Colors.greenAccent, size: 16),
+                            const Icon(
+                              Icons.speed,
+                              color: Colors.greenAccent,
+                              size: 16,
+                            ),
                             const SizedBox(width: 6),
                             Text(
-                              'FPS: $_fps | ${_lastInferenceTime?.inMilliseconds ?? 0}ms',
+                              'FPS: $_fps | ${_lastInferenceTime?.inMilliseconds ?? 0}ms | Nails: ${_nailPolygons.length}',
                               style: const TextStyle(
                                 color: Colors.white,
                                 fontSize: 12,
@@ -268,16 +317,22 @@ class _ArCameraPageState extends State<ArCameraPage> {
                               const SizedBox(
                                 width: 10,
                                 height: 10,
-                                child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.white,
+                                ),
                               ),
-                            ]
+                            ],
                           ],
                         ),
                       ),
                       GestureDetector(
                         onTap: () => _onBookVariant(_selectedVariant),
                         child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 14,
+                            vertical: 6,
+                          ),
                           decoration: BoxDecoration(
                             color: const Color(0xFFFF4081),
                             borderRadius: BorderRadius.circular(20),
@@ -285,13 +340,17 @@ class _ArCameraPageState extends State<ArCameraPage> {
                               BoxShadow(
                                 color: Colors.pink.withValues(alpha: 0.5),
                                 blurRadius: 8,
-                              )
+                              ),
                             ],
                           ),
                           child: const Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              Icon(Icons.calendar_month, color: Colors.white, size: 16),
+                              Icon(
+                                Icons.calendar_month,
+                                color: Colors.white,
+                                size: 16,
+                              ),
                               SizedBox(width: 6),
                               Text(
                                 'Đặt lịch ngay',
@@ -315,7 +374,10 @@ class _ArCameraPageState extends State<ArCameraPage> {
                   left: 16,
                   right: 16,
                   child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 8,
+                    ),
                     decoration: BoxDecoration(
                       color: Colors.black.withValues(alpha: 0.75),
                       borderRadius: BorderRadius.circular(14),
@@ -349,7 +411,10 @@ class _ArCameraPageState extends State<ArCameraPage> {
                               ),
                               Text(
                                 'Form: ${_selectedVariant.shapeName} • ${_selectedVariant.surfaceName}',
-                                style: const TextStyle(color: Colors.white70, fontSize: 11),
+                                style: const TextStyle(
+                                  color: Colors.white70,
+                                  fontSize: 11,
+                                ),
                               ),
                             ],
                           ),
@@ -384,12 +449,10 @@ class _ArCameraPageState extends State<ArCameraPage> {
                         final item = _variants[index];
                         return NailVariantCard(
                           variant: item,
-                          isSelected: item.nailVariantId == _selectedVariant.nailVariantId,
-                          onTap: () {
-                            setState(() {
-                              _selectedVariant = item;
-                            });
-                          },
+                          isSelected:
+                              item.nailVariantId ==
+                              _selectedVariant.nailVariantId,
+                          onTap: () => _selectVariant(item),
                         );
                       },
                     ),
